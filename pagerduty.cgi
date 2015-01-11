@@ -11,8 +11,8 @@ use LWP::UserAgent;
 
 my $CONFIG = {
 	# Nagios/Ubuntu defaults
-	'command_file' => '/var/lib/nagios3/rw/nagios.cmd', # External commands file
-	'status_file' => '/var/cache/nagios3/status.dat', # Status data file
+	#'command_file' => '/var/lib/nagios3/rw/nagios.cmd', # External commands file
+	#'status_file' => '/var/cache/nagios3/status.dat', # Status data file
 	# Icinga/CentOS defaults
 	#'command_file' => '/var/spool/icinga/cmd/icinga.cmd', # External commands file
 	#'status_file' => '/var/spool/icinga/status.dat', # Status data file
@@ -20,6 +20,9 @@ my $CONFIG = {
 	'ack_ttl' => 0, # Time in seconds the acknowledgement in Icinga last before
 	                # it times out automatically. 0 means the acknowledgement
 	                # never expires. If you're using Nagios this MUST be 0.
+	# NagiosXI defaults
+	'command_file' => '/usr/local/nagios/var/rw/nagios.cmd', # External commands file
+	'status_file' => '/usr/local/nagios/var/status.dat', # Status data file
 };
 
 # =============================================================================
@@ -32,6 +35,7 @@ sub problemToHostService {
 	$problems = {};
 
 	if (! open (STATUS, '<', $CONFIG->{'status_file'})) {
+		printf (STDERR "couldn't open status file %s: %d\n", $CONFIG->{'status_file'}, $!);
 		return (undef, $!);
 	}
 
@@ -62,6 +66,14 @@ sub problemToHostService {
 					$problems->{$section->{'current_problem_id'} . ''} = {
 						'host' => $section->{'host_name'},
 					};
+					# the "official" pager duty nagios integration generates incident
+					# ids that don't vary (and hence won't re-alert) if a host flaps
+					# in a way that nagios doesn't detect as flapping.  this next block 
+					# allows this cgi to interop with that integration
+					$problems->{sprintf ("event_source=host;host_name=%s", $section->{'host_name'})} = {
+						'problem_id' => $section->{'current_problem_id'} . '',
+						'host' => $section->{'host_name'}
+					};
 				}
 				if (defined ($section->{'last_problem_id'}) && $section->{'last_problem_id'}) {
 					$problems->{$section->{'last_problem_id'} . ''} = {
@@ -77,6 +89,17 @@ sub problemToHostService {
 
 				if (defined ($section->{'current_problem_id'}) && $section->{'current_problem_id'}) {
 					$problems->{$section->{'current_problem_id'} . ''} = {
+						'host' => $section->{'host_name'},
+						'service' => $section->{'service_description'},
+					};
+					# the "official" pager duty nagios integration generates incident
+					# ids that don't vary (and hence won't re-alert) if a service flaps
+					# in a way that nagios doesn't detect as flapping.  this next block 
+					# allows this cgi to interop with that integration
+					$problems->{sprintf ("event_source=service;host_name=%s;service_desc=%s",
+						             $section->{'host_name'},
+						             $section->{'service_description'})} = {
+						'problem_id' => $section->{'current_problem_id'},
 						'host' => $section->{'host_name'},
 						'service' => $section->{'service_description'},
 					};
@@ -113,6 +136,7 @@ sub problemToHostService {
 		return ($problems->{$problemID . ''});
 	}
 
+	printf (STDERR "couldn't find problemID %s\n", $problemID);
 	return (undef);
 }
 
@@ -215,6 +239,8 @@ $TIME = time ();
 
 $QUERY = CGI->new ();
 
+#open (DEBUGLOG, '>>', '/tmp/pagerduty.cgi.debug');
+
 if (! defined ($POST = $QUERY->param ('POSTDATA'))) {
 	print ("Status: 400 Requests must be POSTs\n\n400 Requests must be POSTs\n");
 	exit (0);
@@ -240,12 +266,14 @@ MESSAGE: foreach $message (@{$JSON->{'messages'}}) {
 	my ($hostservice, $status, $error);
 
 	if ((ref ($message) ne 'HASH') || ! defined ($message->{'type'})) {
+		printf (STDERR "skipping message, not a hash or no type defined in message\n");
 		next MESSAGE;
 	}
 
 	$hostservice = problemToHostService ($message->{'data'}->{'incident'}->{'incident_key'});
 
 	if (! defined ($hostservice)) {
+		printf (STDERR "skipping message, problemToHostService returned undef\n");
 		next MESSAGE;
 	}
 
